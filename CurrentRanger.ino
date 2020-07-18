@@ -81,6 +81,7 @@
 #define OLED_BAUD                   1600000 //fast i2c clock
 #define OLED_ADDRESS                0x3C    //i2c address on most small OLEDs
 #define OLED_REFRESH_INTERVAL       180     //ms
+#define AVG_SAMPLE_INTERVAL         60      //ms
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 //***********************************************************************************************************
 #define TOUCH_N        8
@@ -100,12 +101,14 @@ Adafruit_FreeTouch qt[3] = {
 #define NA_NOT_PRESSED        !(NA_PRESSED)
 #define TOUCH_SAMPLE_INTERVAL 50 //ms
 //***********************************************************************************************************
-#define SERIAL_UART_BAUD        230400      //Serial baud for HC-06/bluetooth output
+//#define SERIAL_UART_BAUD        230400      //Serial baud for HC-06/bluetooth output
+#define SERIAL_UART_BAUD        38400      //Serial baud for HC-06/bluetooth output
 #define BT_SERIAL_EN
 //#define LOGGER_FORMAT_EXPONENT  //ex: 123E-3 = 123mA
 //#define LOGGER_FORMAT_NANOS     //ex: 123456 = 123456nA = 123.456uA
 //#define LOGGER_FORMAT_ADC       //raw ADC output - note: automatic ADC_REF change
 #define BT_REFRESH_INTERVAL     200 //ms
+#define USB_LOGGING_INTERVAL    25 //ms 
 //***********************************************************************************************************
 #define AUTOFFBUZZDELAY         500 //ms
 #define AUTOFF_DEFAULT          600 //seconds, turn unit off after 10min of inactivity
@@ -125,6 +128,7 @@ uint16_t gainCorrectionValue = 0;
 float ldoValue = 0, ldoOptimized=0;
 uint16_t AUTOFF_INTERVAL = 0;
 uint8_t USB_LOGGING_ENABLED = false;
+uint32_t usbLoggingInterval = 0;
 uint8_t TOUCH_DEBUG_ENABLED = false;
 uint8_t GPIO_HEADER_RANGING = false;
 uint8_t BT_LOGGING_ENABLED = true;
@@ -146,8 +150,14 @@ FlashStorage(eeprom_LDO, float);
 FlashStorage(eeprom_AUTOFF, uint16_t);
 FlashStorage(eeprom_LOGGINGFORMAT, uint8_t);
 FlashStorage(eeprom_ADCSAMPLINGSPEED, uint8_t);
-#include <ATSAMD21_ADC.h>
+#include "ATSAMD21_ADC.h"
+
+#include "average.h"
 //***********************************************************************************************************
+
+//Average a(2);
+float buffer[10];
+Average a(&buffer[0], 10);
 
 void setup() {
   Serial.begin(1); //USB speed
@@ -249,13 +259,42 @@ void setup() {
   }
 
 #ifdef BT_SERIAL_EN
+  setup_bt();
+#endif
+
+  printCalibInfo();
+  printSerialMenu();
+  WDTset();
+  if (STARTUP_MODE == MODE_AUTORANGE) toggleAutoranging();
+/*
+  
+  a.push(1.2);
+  a.push(1.0);  
+  a.push(1.2);
+  a.push(1.0);
+  a.push(1.5);
+  Serial.print("Average: ");
+  Serial.println(a.mean());
+  Serial.print("stddev: ");
+  Serial.println(a.stdev());
+  Serial.print("corrected average: ");
+  Serial.println(a.correctedMean());
+  */
+}
+
+void setup_bt() {
+
   //BT check
+  Serial.println("Menno was hier");
   Serial.print("Bluetooth AT check @");Serial.print(SERIAL_UART_BAUD);Serial.print("baud...");
   SerialBT.begin(SERIAL_UART_BAUD);
+  //while(1) {
   SerialBT.print("AT"); //assuming HC-06, no line ending required
   uint32_t timer=millis();
-  while(millis()-timer<1000) //about 1s to respond
+  //while(millis()-timer<1000) //about 1s to respond
+  while(millis()-timer<10) //about 1s to respond
   {
+    //Serial.println(SerialBT.available());
     if (SerialBT.available()==2 && SerialBT.read()=='O' && SerialBT.read()=='K')
     {
       BT_found=true;
@@ -264,10 +303,11 @@ void setup() {
   }
 
   Serial.print(BT_found?"OK!":"No HC-06 response.\r\nChecking for BT v3.0...");
-
+  //}
   if (!BT_found)
   {
     SerialBT.print("\r\n"); //assuming HC-06 version 3.0 that requires line ending
+    //SerialBT.print("AT");
     uint32_t timer=millis();
     while(millis()-timer<50) //about 50ms to respond
     {
@@ -280,15 +320,9 @@ void setup() {
   
     Serial.println(BT_found?"OK!":"No response.");
   }
-#endif
-
-  printCalibInfo();
-  printSerialMenu();
-  WDTset();
-  if (STARTUP_MODE == MODE_AUTORANGE) toggleAutoranging();
 }
 
-uint32_t oledInterval=0, lpfInterval=0, offsetInterval=0, autorangeInterval=0, btInterval=0,
+uint32_t avgSampleInterval=0, oledInterval=0, lpfInterval=0, offsetInterval=0, autorangeInterval=0, btInterval=0,
          autoOffBuzzInterval=0, touchSampleInterval=0, lastRangeChange=0;
 byte LPF=0, BIAS=0, AUTORANGE=0;
 byte readVbatLoop=0;
@@ -321,6 +355,54 @@ void loop()
     char inByte = Serial.read();
     switch (inByte)
     {
+      case 'B':
+        setup_bt();
+        break;
+      case 'm':
+        
+        if(AUTORANGE) {
+            toggleAutoranging();
+        }
+        LOGGING_FORMAT=LOGGING_FORMAT_MILLIS;
+        rangeMA();
+        Serial.println("OK");
+        Serial.println("mA mode");
+        rangeBeep();
+        break;
+      case 'u':
+        
+        if(AUTORANGE) {
+            toggleAutoranging();
+        }
+        LOGGING_FORMAT=LOGGING_FORMAT_MICROS;
+        rangeUA();
+        Serial.println("OK");
+        Serial.println("uA mode");
+        rangeBeep();
+        break;
+      case 'n':
+        
+        if(AUTORANGE) {
+          toggleAutoranging();         
+        }
+        LOGGING_FORMAT=LOGGING_FORMAT_NANOS;
+        rangeNA(); 
+        Serial.println("OK");        
+        Serial.println("nA mode");                
+        rangeBeep();
+        break;
+      case 'A':
+        if(!AUTORANGE) {
+          toggleAutoranging();
+          //Serial.println("OK");
+          //Serial.println("auto range mode");        
+            
+//            Beep(20, false); 
+//            delay(50);
+//            Beep(20, false); 
+        }
+        Serial.println("OK");
+        break;        
       case '+':
         eeprom_ADCgain.write(++gainCorrectionValue);
         analogReadCorrection(offsetCorrectionValue,gainCorrectionValue);
@@ -343,9 +425,34 @@ void loop()
         Serial.print("new LDO_Value = ");
         Serial.println(ldoValue, 3);
         break;
-      case 'u': //toggle USB logging
-        USB_LOGGING_ENABLED =! USB_LOGGING_ENABLED;
-        Serial.println(USB_LOGGING_ENABLED ? "USB_LOGGING_ENABLED" : "USB_LOGGING_DISABLED");
+      //case 'u': //toggle USB logging
+      case 'p':
+        //lpf off
+        if (LPF) {          
+          toggleLPF();
+        }
+        Serial.println("OK");
+        Serial.println("LPF off");
+        break;
+      case 'P':
+        //lpf on
+        if(!LPF) {
+          toggleLPF();
+        }
+        Serial.println("OK");
+        Serial.println("LPF on");
+        break;
+      case 'l': //toggle USB logging
+        //USB_LOGGING_ENABLED =! USB_LOGGING_ENABLED;
+        //Serial.println(USB_LOGGING_ENABLED ? "USB_LOGGING_ENABLED" : "USB_LOGGING_DISABLED");
+        USB_LOGGING_ENABLED = false;
+        Serial.println("OK");
+        Serial.println("USB_LOGGING_DISABLED");
+        break;
+      case 'L':
+        USB_LOGGING_ENABLED = true;
+        Serial.println("OK");
+        Serial.println("USB_LOGGING_ENABLED");
         break;
       case 't': //toggle touchpad serial output debug info
         TOUCH_DEBUG_ENABLED =! TOUCH_DEBUG_ENABLED;
@@ -363,16 +470,16 @@ void loop()
       case 'b': //toggle BT/serial logging
         BT_LOGGING_ENABLED =! BT_LOGGING_ENABLED;
         Serial.println(BT_LOGGING_ENABLED ? "BT_LOGGING_ENABLED" : "BT_LOGGING_DISABLED");
-        break;
-      case 'f': //cycle through output logging formats
+        break;       
+      case 'f': //cycle through output logging formats      
         if (++LOGGING_FORMAT>LOGGING_FORMAT_ADC) LOGGING_FORMAT=LOGGING_FORMAT_EXPONENT;
         eeprom_LOGGINGFORMAT.write(LOGGING_FORMAT);
         if (LOGGING_FORMAT==LOGGING_FORMAT_EXPONENT) Serial.println("LOGGING_FORMAT_EXPONENT"); else
         if (LOGGING_FORMAT==LOGGING_FORMAT_NANOS) Serial.println("LOGGING_FORMAT_NANOS"); else
         if (LOGGING_FORMAT==LOGGING_FORMAT_MICROS) Serial.println("LOGGING_FORMAT_MICROS"); else
         if (LOGGING_FORMAT==LOGGING_FORMAT_MILLIS) Serial.println("LOGGING_FORMAT_MILLIS"); else
-        if (LOGGING_FORMAT==LOGGING_FORMAT_ADC) Serial.println("LOGGING_FORMAT_ADC");
-        break;
+        if (LOGGING_FORMAT==LOGGING_FORMAT_ADC) Serial.println("LOGGING_FORMAT_ADC");        
+        break;        
       case 's':
         if (++ADC_SAMPLING_SPEED>ADC_SAMPLING_SPEED_SLOW) ADC_SAMPLING_SPEED=ADC_SAMPLING_SPEED_AVG;
         if (ADC_SAMPLING_SPEED==ADC_SAMPLING_SPEED_AVG) Serial.println("ADC_SAMPLING_SPEED_AVG"); else
@@ -384,16 +491,24 @@ void loop()
       case 'a': //toggle autoOff function
         if (AUTOFF_INTERVAL == AUTOFF_DEFAULT)
         {
+          Serial.println("OK");
           Serial.println("AUTO_OFF_DISABLED");
           AUTOFF_INTERVAL = 0xFFFF;
         }
         else
         {
+          Serial.println("OK");
           Serial.println("AUTO_OFF_ENABLED");
           AUTOFF_INTERVAL = AUTOFF_DEFAULT;
           lastRangeChange = millis();
         }
         eeprom_AUTOFF.write(AUTOFF_INTERVAL);
+        break;
+      case 'q':
+        Serial.println("Averageing off");
+        break;
+      case 'Q':
+        Serial.println("Averageing on");
         break;
       case '?':
         printCalibInfo();
@@ -423,18 +538,33 @@ void loop()
       return; //!!!
     }
   }
-
+//NOW
   uint8_t VOUTCalculated=false;
-  if (USB_LOGGING_ENABLED)
+  //if (USB_LOGGING_ENABLED)
+
+  if (USB_LOGGING_ENABLED && millis() - usbLoggingInterval > USB_LOGGING_INTERVAL)
   {//TODO: refactor
+    usbLoggingInterval = millis();
     if (!AUTORANGE) readVOUT();
     VOUT = readDiff*ldoOptimized*(BIAS?1:OUTPUT_CALIB_FACTOR);
     VOUTCalculated=true;
+    //TODO unify bt serial and usb serial
+    // for processing add token;
+    Serial.print("d:");
     if(LOGGING_FORMAT == LOGGING_FORMAT_EXPONENT) { Serial.print(VOUT); Serial.print("e"); Serial.println(RANGE_NA ? -9 : RANGE_UA ? -6 : -3); } else
-    if(LOGGING_FORMAT == LOGGING_FORMAT_NANOS) Serial.println(VOUT * (RANGE_NA ? 1 : RANGE_UA ? 1000 : 1000000)); else
-    if(LOGGING_FORMAT == LOGGING_FORMAT_MICROS) Serial.println(VOUT * (RANGE_NA ? 0.001 : RANGE_UA ? 1 : 1000)); else
-    if(LOGGING_FORMAT == LOGGING_FORMAT_MILLIS) Serial.println(VOUT * (RANGE_NA ? 0.000001 : RANGE_UA ? 0.001 : 1)); else
-    if(LOGGING_FORMAT == LOGGING_FORMAT_ADC) Serial.println(readDiff,0);
+    if(LOGGING_FORMAT == LOGGING_FORMAT_NANOS) { 
+      Serial.print(VOUT * (RANGE_NA ? 1 : RANGE_UA ? 1000 : 1000000));
+      Serial.println(":nA");
+    } else if(LOGGING_FORMAT == LOGGING_FORMAT_MICROS) {
+      Serial.print(VOUT * (RANGE_NA ? 0.001 : RANGE_UA ? 1 : 1000)); 
+      Serial.println(":uA");
+    } else if(LOGGING_FORMAT == LOGGING_FORMAT_MILLIS) {
+      Serial.print(VOUT * (RANGE_NA ? 0.000001 : RANGE_UA ? 0.001 : 1)); 
+      Serial.println(":mA");
+    } else if(LOGGING_FORMAT == LOGGING_FORMAT_ADC) {
+      Serial.print(readDiff,0);
+      Serial.println(":cnt");     
+    }
   }
 
 #ifdef BT_SERIAL_EN
@@ -446,6 +576,7 @@ void loop()
       VOUT = readDiff*ldoOptimized*(BIAS?1:OUTPUT_CALIB_FACTOR);
       VOUTCalculated=true;
     }
+    
     if(LOGGING_FORMAT == LOGGING_FORMAT_EXPONENT) { SerialBT.print(VOUT); SerialBT.print("e"); SerialBT.println(RANGE_NA ? -9 : RANGE_UA ? -6 : -3); } else
     if(LOGGING_FORMAT == LOGGING_FORMAT_NANOS) SerialBT.println(VOUT * (RANGE_NA ? 1 : RANGE_UA ? 1000 : 1000000)); else
     if(LOGGING_FORMAT == LOGGING_FORMAT_MICROS) SerialBT.println(VOUT * (RANGE_NA ? 0.001 : RANGE_UA ? 1 : 1000)); else
@@ -453,10 +584,25 @@ void loop()
     if(LOGGING_FORMAT == LOGGING_FORMAT_ADC) SerialBT.println(readDiff,0);
   }
 #endif
+  if(millis()-avgSampleInterval > AVG_SAMPLE_INTERVAL) {
+    //a.push(VOUT);
+    readVOUT();
+    VOUT = readDiff*ldoOptimized*(BIAS?1:OUTPUT_CALIB_FACTOR);
+    a.push((float)VOUT*1.0);
+    avgSampleInterval = millis();
+  }
 
   //OLED refresh: ~22ms (SCK:1.6mhz, ADC:64samples/DIV16/b111)
   if (OLED_found && millis() - oledInterval > OLED_REFRESH_INTERVAL) //refresh rate (ms)
   {
+
+    /*
+    Serial.print("mean:");
+    Serial.println(a.mean());
+    a.stdev(); //needed for correctedMean
+    Serial.print("correctedMean:");
+    Serial.println(a.correctedMean());
+    */
     oledInterval = millis();
     if (!AUTORANGE) readVOUT();
     if (!VOUTCalculated) VOUT = readDiff*ldoOptimized*(BIAS?1:OUTPUT_CALIB_FACTOR);
@@ -500,6 +646,9 @@ void loop()
     u8g2.setCursor(106,64); u8g2.print('A');
     u8g2.setCursor(RANGE_MA?102:106,38); u8g2.print(RANGE_UA?char('µ'):rangeUnit);
     u8g2.setFont(u8g2_font_logisoso32_tr);
+    // menno average Vout
+    VOUT = a.mean();
+    //VOUT = a.correctedMean();
     u8g2.setCursor(0,64); u8g2.print((BIAS&&abs(VOUT)>=0.4||!BIAS&&VOUT>=0.4)?VOUT:0, abs(VOUT)>=1000?0:1);
     if (!BIAS && readDiff>ADC_OVERLOAD || BIAS && abs(readDiff)>ADC_OVERLOAD/2)
     {
@@ -675,6 +824,7 @@ int adcRead(byte ADCpin) { return (int)analogRead(ADCpin); }
 void readVOUT() {
   readDiff = adcRead(SENSE_OUTPUT) - adcRead(SENSE_GNDISO);
 
+// TODO what is this? recursive?
   if (!analog_ref_half && readDiff > RANGE_SWITCH_THRESHOLD_LOW && readDiff < RANGE_SWITCH_THRESHOLD_HIGH/3)
   {
     analogReferenceHalf(true);
@@ -761,13 +911,20 @@ void printCalibInfo() {
 }
 void printSerialMenu() {
   Serial.println("\r\nUSB serial commands:");
+  Serial.println("m = mA mode");
+  Serial.println("u = uA mode");
+  Serial.println("n = nA mode");
+  Serial.println("A = Auto range mode");
   Serial.println("a = toggle Auto-Off function");
   Serial.print  ("b = toggle BT/serial logging (");Serial.print(SERIAL_UART_BAUD);Serial.println("baud)");
   Serial.println("f = cycle serial logging formats (exponent,nA,uA,mA/raw-ADC)");
   Serial.println("g = toggle GPIO range indication (SCK=mA,MISO=uA,MOSI=nA)");
   Serial.println("s = cycle ADC sampling speeds (average,faster,slower)");
   Serial.println("t = toggle touchpad serial output debug info");
-  Serial.println("u = toggle USB/serial logging");
+  Serial.println("L = start USB/serial logging");
+  Serial.println("l = stop USB/serial logging");
+  Serial.println("P = lpf on");
+  Serial.println("p = lpf off");
   Serial.println("< = Calibrate LDO value (-1mV)");
   Serial.println("> = Calibrate LDO value (+1mV)");
   Serial.println("- = Calibrate GAIN value (-1)");

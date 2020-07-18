@@ -1,7 +1,8 @@
 # CurrentRanger
 Precision auto-ranging current meter (ammeter)
 
-## Fork to get the CurrentRanger usable for automating testing rig
+## This fork info
+Trying to get the CurrentRanger usable for automating in a testing rig.
 
 ## [Please see the full guide and latest updates posted here.](https://lowpowerlab.com/guide/currentranger/)
 
